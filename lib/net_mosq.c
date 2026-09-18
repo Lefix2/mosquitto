@@ -71,6 +71,7 @@ Contributors:
 #    include <libwebsockets.h>
 #  endif
 #else
+#  include "callbacks.h"
 #  include "read_handle.h"
 #endif
 
@@ -918,6 +919,11 @@ int net__socket_connect_step3(struct mosquitto *mosq, const char *host)
 	}
 
 	if(mosq->ssl_ctx){
+		if(!host){
+			/* External transport without MOSQ_OPT_PEER_NAME */
+			net__socket_close(mosq);
+			return MOSQ_ERR_INVAL;
+		}
 		if(mosq->ssl){
 			SSL_free(mosq->ssl);
 		}
@@ -966,18 +972,53 @@ int net__socket_connect_step3(struct mosquitto *mosq, const char *host)
 }
 
 
+#ifndef WITH_BROKER
+/* Get a connected socket from the application. Never fall back to connecting
+ * ourselves, that would bypass whatever the external transport provides. */
+static int net__try_connect_external(struct mosquitto *mosq)
+{
+	int sock = -1;
+	int rc;
+
+	rc = callback__on_transport_open(mosq, &sock);
+	if(rc){
+		return rc;
+	}
+	if(sock < 0){
+		return MOSQ_ERR_INVAL;
+	}
+	mosq->sock = sock;
+
+	return net__socket_nonblock(&mosq->sock);
+}
+#endif
+
+
 /* Create a socket and connect it to 'ip' on port 'port'.  */
 int net__socket_connect(struct mosquitto *mosq, const char *host, uint16_t port, const char *bind_address, bool blocking)
 {
 	int rc, rc2;
 
-	if(!mosq || !host){
+	if(!mosq){
 		return MOSQ_ERR_INVAL;
 	}
 
-	rc = net__try_connect(host, port, &mosq->sock, bind_address, blocking);
-	if(rc > 0){
-		return rc;
+#ifndef WITH_BROKER
+	if(mosq->on_transport_open){
+		rc = net__try_connect_external(mosq);
+		if(rc){
+			return rc;
+		}
+	}else
+#endif
+	{
+		if(!host){
+			return MOSQ_ERR_INVAL;
+		}
+		rc = net__try_connect(host, port, &mosq->sock, bind_address, blocking);
+		if(rc > 0){
+			return rc;
+		}
 	}
 
 	if(mosq->tcp_nodelay && port){
